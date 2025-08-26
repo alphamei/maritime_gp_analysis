@@ -334,7 +334,7 @@ y_test_unscaled = y_test * y_std + y_mean
 y_std_unscaled = y_std_scaled * y_std
 
 
-# Compute prediction intervals for a 95% interval
+# Compute the Probabilistic Forecast metrics
 z_score = 1.96
 interval_lower = y_pred - z_score * y_std
 interval_upper = y_pred + z_score * y_std
