@@ -208,7 +208,7 @@ train_vessels = vessels[:25]
 test_vessels = vessels[25:30]
 print(f"   Training vessels: {len(train_vessels)}, Test vessels: {len(test_vessels)}")
 
-print("2️⃣ Feature selection - using most important features")
+print("Feature selection - using most important features")
 all_features = ['Quarter', 'VesselAge', 'TimeSinceDryDock', 'WACC', 'Opex',
                 'Inflation', 'ForwardFreightRate', 'LaggedBDI', 'LaggedVesselValue',
                 'COVID', 'IMORegs', 'Geopolitical']
@@ -235,9 +235,8 @@ print("   Recalculated F-Scores for forced features:", forced_scores)
 
 
 
-
 # 3) Polynomial time feature
-print("3️⃣ Adding polynomial time features")
+print("Adding polynomial time features")
 poly = PolynomialFeatures(degree=2, include_bias=False, interaction_only=False)
 _ = poly.fit_transform(train_data[['Quarter']].values)  # For structure mirroring
 
@@ -335,9 +334,22 @@ y_test_unscaled = y_test * y_std + y_mean
 y_std_unscaled = y_std_scaled * y_std
 
 
+# Compute prediction intervals for a 95% interval
+z_score = 1.96
+interval_lower = y_pred - z_score * y_std
+interval_upper = y_pred + z_score * y_std
+
+# Calculate PICP (Coverage): Fraction of observed values within the prediction intervals
+PICP = np.mean((y_test_unscaled >= interval_lower) & (y_test_unscaled <= interval_upper))
+print("Prediction Interval Coverage Probability (PICP):", PICP)
+
+# Calculate Precision: Average width of the prediction intervals
+precision = np.mean(interval_upper - interval_lower)
+print("Average Interval Width (Sharpness):", precision)
+
 # ----- Basic Risk-Tiered Review Protocols -----
-# Define the thresholds for the risk tiers based on z-scores (95% confidence is not exactly used here,
-# but we choose thresholds that capture low, moderate, and high risk)
+# Thresholds for the risk tiers based on z-scores
+# We choose thresholds that capture low, moderate, and high risk
 green_thresh = 1.0   # Green: z-score less than 1.0 (automatic acceptance)
 amber_thresh = 2.0   # Amber: z-score between 1.0 and 2.0 (requires analyst review)
 # Red: z-score >= 2.0 (investment committee escalation)
@@ -365,7 +377,7 @@ print("Risk Tiered Review Summary for Test Set:")
 for category, count in risk_counts.items():
     print(f"{category}: {count} observations")
 
-# Optionally, create a DataFrame with predictions, actual values, and risk classifications
+# DataFrame with predictions, actual values, and risk classifications
 risk_df = pd.DataFrame({
     'Actual': y_test_unscaled,
     'Prediction': y_pred,
@@ -474,7 +486,7 @@ print(f"   AIC: {aic_matern:.3f}, BIC: {bic_matern:.3f}")
 
 
 # ---------------------------
-# For Linear Regression Model
+# Linear Regression Model
 # ---------------------------
 lr_model = LinearRegression()
 lr_model.fit(X_train, y_train)
@@ -487,7 +499,7 @@ rmse_lr = np.sqrt(mean_squared_error(y_test_unscaled, y_pred_lr))
 
 
 # ---------------------------
-# For Random Forest Model
+# Random Forest Model
 # ---------------------------
 rf_model = RandomForestRegressor(n_estimators=100, random_state=42)
 rf_model.fit(X_train, y_train)
@@ -499,7 +511,7 @@ mae_rf = mean_absolute_error(y_test_unscaled, y_pred_rf)
 rmse_rf = np.sqrt(mean_squared_error(y_test_unscaled, y_pred_rf))
 
 
-# ----- Print Comparison Metrics -----
+# ----- Comparison Metrics -----
 print("\n--- Model Comparison Results ---")
 print("Baseline GP:")
 print(f"   R²: {r2_baseline:.3f}, MAE: {mae_baseline:.3f}, RMSE: {rmse_baseline:.3f}")
@@ -512,7 +524,7 @@ print(f"   R²: {r2_rf:.3f}, MAE: {mae_rf:.3f}, RMSE: {rmse_rf:.3f}")
 
 
 # ---------------------------
-# Step 3: Enhanced Visualization
+# Step 3: Visualization
 # ---------------------------
 print("\n Creating enhanced visualizations...")
 fig = plt.figure(figsize=(20, 15))
@@ -669,7 +681,7 @@ else:
     mean_cv_r2, std_cv_r2 = float("nan"), float("nan")
 
 # ---------------------------
-# Step 5: Save results and summary
+# Step 5: Results and summary
 # ---------------------------
 synthetic_df.to_csv(f'{output_dir}/fixed_synthetic_data.csv', index=False)
 summary = f"""
