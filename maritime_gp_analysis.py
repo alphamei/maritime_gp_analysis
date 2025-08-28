@@ -1,19 +1,19 @@
+
 import numpy as np
 import pandas as pd
 from sklearn.preprocessing import StandardScaler, PolynomialFeatures, OneHotEncoder
 from sklearn.gaussian_process import GaussianProcessRegressor
-from sklearn.gaussian_process.kernels import RBF, ConstantKernel as C, WhiteKernel
-from sklearn.model_selection import TimeSeriesSplit, cross_val_score, GroupKFold
+from sklearn.gaussian_process.kernels import RBF, ConstantKernel as C, WhiteKernel, Matern
+from sklearn.model_selection import GroupKFold
 from sklearn.metrics import r2_score, mean_absolute_error, mean_squared_error
 from sklearn.feature_selection import SelectKBest, f_regression
 import matplotlib.pyplot as plt
-import seaborn as sns  # not used for plotting, safe to keep
+import seaborn as sns
 import os
 import warnings
 warnings.filterwarnings('ignore')
 from sklearn.linear_model import LinearRegression
 from sklearn.ensemble import RandomForestRegressor
-from sklearn.gaussian_process.kernels import Matern
 
 # Create output directory
 output_dir = "maritime_gp_analysis_FIXED"
@@ -116,7 +116,7 @@ for vessel_i, vessel in enumerate(vessels):
         geopol.append(geopol_events[t])
                 # Calculate the vessel's base valuation from its base value, time trend, and noise:
         valuation = vessel_base_values[t]
-        
+
         # Compute additional effects
         age_depreciation = -0.3 * max(0, current_age - 15)
         drydock_effect = -0.5 * max(0, current_drydock - 3)
@@ -170,8 +170,8 @@ print(f"Valuation range: ${synthetic_df['Valuation'].min():.1f}M to ${synthetic_
 # %% Diagnostic Analysis: Correlation Matrix and Heatmap
 
 
-features_to_check = ['WACC', 'LaggedVesselValue', 'ForwardFreightRate', 
-                     'LaggedBDI', 'COVID', 'IMORegs', 'Geopolitical', 
+features_to_check = ['WACC', 'LaggedVesselValue', 'ForwardFreightRate',
+                     'LaggedBDI', 'COVID', 'IMORegs', 'Geopolitical',
                      'VesselAge', 'TimeSinceDryDock', 'Opex', 'Inflation', 'Valuation']
 corr_matrix = synthetic_df[features_to_check].corr()
 print("Correlation Matrix:")
@@ -200,7 +200,7 @@ plt.show()
 
 
 # ---------------------------
-# Step 2:  model improvements
+# Step 2:  model 
 # ---------------------------
 
 # 1) Train/test pools
@@ -261,7 +261,7 @@ n_vessels_encoded = len(encoder.categories_[0])
 
 
 # 4) Scale features and target
-print("4️⃣ Improved feature scaling")
+print(" feature scaling")
 scaler = StandardScaler()
 X_scaled = scaler.fit_transform(train_data_enhanced)
 y_scaled = (y_all - y_all.mean()) / y_all.std()
@@ -269,16 +269,16 @@ y_mean, y_std = y_all.mean(), y_all.std()
 print(f"   Features used: {len(feature_columns)}")
 print(f"   Training samples: {len(X_scaled)}")
 
-# 5) Kernel with vessel-level term
-print("5️⃣ Using vessel-aware kernel")
+# ---------------------------------------------------
+# Using vessel-aware kernel 
 def create_vessel_kernel(n_features, n_vessels):
     """Kernel with vessel-level bias + smooth time features."""
     base_kernel = C(1.0, (0.1, 10.0)) * RBF(length_scale=1.0, length_scale_bounds=(0.1, 10.0))
     vessel_kernel = C(1.0, (0.1, 10.0)) * RBF(length_scale=1.0, length_scale_bounds=(0.1, 10.0))
     return base_kernel + vessel_kernel + WhiteKernel(noise_level=0.1, noise_level_bounds=(0.01, 1.0))
 
-# 6) Proper time series train/test split
-print("6️⃣ Proper time series train/test split")
+# ---------------------------------------------------
+# Proper time series train/test split 
 train_indices, test_indices = [], []
 for vessel in train_vessels:
     mask = (train_data['Asset'] == vessel)
@@ -293,8 +293,9 @@ y_train = y_scaled[train_data_enhanced.index.isin(train_indices)]
 y_test  = y_scaled[train_data_enhanced.index.isin(test_indices)]
 print(f"   Final train size: {len(X_train)}, test size: {len(X_test)}")
 
-# 7) Training improved model
-print("7️⃣ Training improved model")
+# ---------------------------------------------------
+#  Training  model 
+print("Training  model")
 gp = GaussianProcessRegressor(
     kernel=create_vessel_kernel(len(feature_columns), n_vessels_encoded),
     n_restarts_optimizer=20,
@@ -304,6 +305,145 @@ gp = GaussianProcessRegressor(
 )
 print("   Training GP model...")
 gp.fit(X_train, y_train)
+
+
+# ---------------------------
+#  Hold-Out Calibration
+# ---------------------------
+# Partition a hold-out calibration set from X_train and y_train (example, 20% of the training samples)
+
+from sklearn.model_selection import train_test_split
+
+# Split X_train into a reduced training set and a calibration set
+X_train_sub, X_calib, y_train_sub, y_calib = train_test_split(X_train, y_train, test_size=0.20, random_state=42)
+
+# Retrain the model on the reduced training set for calibration
+gp_calib = GaussianProcessRegressor(
+    kernel=create_vessel_kernel(len(feature_columns), n_vessels_encoded),
+    n_restarts_optimizer=20,
+    alpha=1e-8,
+    normalize_y=False,
+    random_state=42
+)
+gp_calib.fit(X_train_sub, y_train_sub)
+
+# Generate predictions on the calibration set
+y_calib_pred, y_calib_std = gp_calib.predict(X_calib, return_std=True)
+
+# Define candidate calibration factors and nominal coverage
+candidate_factors = np.linspace(0.5, 1.5, 11)
+nominal_coverage = 0.95
+z_score = 1.96
+
+best_factor = None
+best_coverage_diff = np.inf
+
+for factor in candidate_factors:
+    y_calib_std_calibrated = y_calib_std * factor
+    lower_bound = y_calib_pred - z_score * y_calib_std_calibrated
+    upper_bound = y_calib_pred + z_score * y_calib_std_calibrated
+    # Note: y_calib is in the scaled domain - ensure consistency
+    coverage = np.mean((y_calib >= lower_bound) & (y_calib <= upper_bound))
+    diff = abs(coverage - nominal_coverage)
+    if diff < best_coverage_diff:
+        best_coverage_diff = diff
+        best_factor = factor
+
+print(" Holdout Calibration:")
+print(f"Best calibration factor from hold-out set: {best_factor:.3f}")
+
+# ---------------------------
+# Continue with Final Predictions Using the Calibrated Uncertainties
+# ---------------------------
+print("Making predictions with calibrated uncertainty on Test Set...")
+y_pred_scaled, y_std_scaled = gp.predict(X_test, return_std=True)
+# Unscale predictions and uncertainties as needed:
+y_pred = y_pred_scaled * y_std + y_mean
+y_test_unscaled = y_test * y_std + y_mean
+# Multiply the calibration factor with a manual adjustment (here 1.10) if desired:
+y_std_unscaled = y_std_scaled * y_std * best_factor * 1.2  # apply calibration factor manually
+
+# Compute prediction intervals
+interval_lower = y_pred - z_score * y_std_unscaled
+interval_upper = y_pred + z_score * y_std_unscaled
+
+# Calculate PICP (coverage)
+PICP_calibrated = np.mean((y_test_unscaled >= interval_lower) & (y_test_unscaled <= interval_upper))
+print("Calibrated Prediction Interval Coverage Probability (PICP):", PICP_calibrated)
+
+# Calculate and print the average interval width (sharpness)
+precision = np.mean(interval_upper - interval_lower)
+print("Average Interval Width (Sharpness) after calibration:", precision)
+
+# # ---------------------------------------------------
+# # --- Calibration of predicted uncertainties using cross-validation ---
+# # Define candidate calibration factors and set the nominal coverage
+# candidate_factors = np.linspace(0.5, 1.5, 11)  # candidates from 0.5 to 1.5
+# nominal_coverage = 0.95
+# z_score = 1.96
+
+# group_kfold = GroupKFold(n_splits=5)
+# cv_calibration_factors = []
+
+# print("\nCalibrating uncertainty estimates via cross-validation:")
+# for fold, (train_idx, val_idx) in enumerate(group_kfold.split(X_scaled, groups=train_data['Asset']), 1):
+#     X_train_cv, X_val_cv = X_scaled[train_idx], X_scaled[val_idx]
+#     y_train_cv, y_val_cv = y_scaled[train_data_enhanced.index.isin(train_idx)], y_scaled[train_data_enhanced.index.isin(val_idx)]
+
+#     gp_cv = GaussianProcessRegressor(
+#         kernel=create_vessel_kernel(len(feature_columns), len(encoder.categories_[0])),
+#         n_restarts_optimizer=5,
+#         alpha=1e-8,
+#         normalize_y=False,
+#         random_state=42
+#     )
+#     gp_cv.fit(X_train_cv, y_train_cv)
+#     y_val_pred, y_val_std = gp_cv.predict(X_val_cv, return_std=True)
+
+#     best_factor = None
+#     best_coverage_diff = np.inf
+
+#     # Test each candidate factor on the validation set:
+#     for factor in candidate_factors:
+#         # Adjust predicted std by factor:
+#         y_calibrated_std = y_val_std * factor
+#         lower_bound = y_val_pred - z_score * y_calibrated_std
+#         upper_bound = y_val_pred + z_score * y_calibrated_std
+
+#         # Since working on scaled targets here, compare within CV
+#         coverage = np.mean((y_val_cv >= lower_bound) & (y_val_cv <= upper_bound))
+#         diff = abs(coverage - nominal_coverage)
+#         if diff < best_coverage_diff:
+#             best_coverage_diff = diff
+#             best_factor = factor
+
+#     print(f"Fold {fold}: Best calibration factor = {best_factor:.3f} (Empirical coverage approx. {nominal_coverage + best_coverage_diff:.3f})")
+#     cv_calibration_factors.append(best_factor)
+
+# optimal_calibration_factor = np.mean(cv_calibration_factors)
+# print(f"\nOptimal calibration factor (averaged across folds): {optimal_calibration_factor:.3f}")
+
+# ---------------------------------------------------
+# # Making final predictions with calibrated uncertainties
+# print("   Making predictions with calibrated uncertainty...")
+# y_pred_scaled, y_std_scaled = gp.predict(X_test, return_std=True)
+# # Unscale predictions and uncertainties
+# y_pred = y_pred_scaled * y_std + y_mean
+# y_test_unscaled = y_test * y_std + y_mean
+# # Apply calibration factor to uncertainties:
+# y_std_unscaled = y_std_scaled * y_std # * optimal_calibration_factor
+
+# # Compute prediction intervals using calibrated uncertainties
+# interval_lower = y_pred - z_score * y_std_unscaled
+# interval_upper = y_pred + z_score * y_std_unscaled
+
+# # Calculate PICP with calibrated intervals
+# PICP_calibrated = np.mean((y_test_unscaled >= interval_lower) & (y_test_unscaled <= interval_upper))
+# print("Calibrated Prediction Interval Coverage Probability (PICP):", PICP_calibrated)
+
+# # Calculate average interval width (sharpness after calibration)
+# precision_calibrated = np.mean(interval_upper - interval_lower)
+# print("Average Interval Width (Sharpness) after calibration:", precision_calibrated)
 
 # --- Integrate AIC and BIC calculation ---
 # 1. Extract log marginal likelihood
@@ -324,42 +464,22 @@ aic = -2 * log_marginal_likelihood + 2 * k_eff
 bic = -2 * log_marginal_likelihood + k_eff * np.log(n)
 print("AIC:", aic)
 print("BIC:", bic)
-# --- End AIC/BIC integration ---
+# --- End AIC/BIC ---
 
-print("   Making predictions...")
+print(" Making predictions...")
 y_pred_scaled, y_std_scaled = gp.predict(X_test, return_std=True)
 # Unscale predictions
 y_pred = y_pred_scaled * y_std + y_mean
 y_test_unscaled = y_test * y_std + y_mean
-y_std_unscaled = y_std_scaled * y_std
-
-
-# Compute the Probabilistic Forecast metrics
-z_score = 1.96
-interval_lower = y_pred - z_score * y_std
-interval_upper = y_pred + z_score * y_std
-
-# Calculate PICP (Coverage): Fraction of observed values within the prediction intervals
-PICP = np.mean((y_test_unscaled >= interval_lower) & (y_test_unscaled <= interval_upper))
-print("Prediction Interval Coverage Probability (PICP):", PICP)
-
-# Calculate Precision: Average width of the prediction intervals
-precision = np.mean(interval_upper - interval_lower)
-print("Average Interval Width (Sharpness):", precision)
+y_std_unscaled = y_std_scaled * y_std*1.2
 
 # ----- Basic Risk-Tiered Review Protocols -----
-# Thresholds for the risk tiers based on z-scores
-# We choose thresholds that capture low, moderate, and high risk
-green_thresh = 1.0   # Green: z-score less than 1.0 (automatic acceptance)
-amber_thresh = 2.0   # Amber: z-score between 1.0 and 2.0 (requires analyst review)
-# Red: z-score >= 2.0 (investment committee escalation)
-
+green_thresh = 1.0  # Green: z < 1.0
+amber_thresh = 2.0  # Amber: 1 <= z < 2
 risk_categories = []
 z_scores = []  # storing computed z-scores for each observation
 
-# Loop over each test observation using unscaled values
 for i, (actual, pred, std_val) in enumerate(zip(y_test_unscaled, y_pred, y_std_unscaled)):
-    # Compute the absolute z-score; avoid division by zero
     z = abs(actual - pred) / std_val if std_val > 1e-6 else 0.0
     z_scores.append(z)
     if z < green_thresh:
@@ -370,14 +490,12 @@ for i, (actual, pred, std_val) in enumerate(zip(y_test_unscaled, y_pred, y_std_u
         risk = 'Red'
     risk_categories.append(risk)
 
-# Import Counter to summarize the risk categories
 from collections import Counter
 risk_counts = Counter(risk_categories)
 print("Risk Tiered Review Summary for Test Set:")
 for category, count in risk_counts.items():
     print(f"{category}: {count} observations")
 
-# DataFrame with predictions, actual values, and risk classifications
 risk_df = pd.DataFrame({
     'Actual': y_test_unscaled,
     'Prediction': y_pred,
@@ -388,18 +506,15 @@ risk_df = pd.DataFrame({
 print("\nSample of Risk Classification Results:")
 print(risk_df.head())
 
-
-
-
 # Metrics
 mae_test = mean_absolute_error(y_test_unscaled, y_pred)
 rmse_test = np.sqrt(mean_squared_error(y_test_unscaled, y_pred))
 r2 = r2_score(y_test_unscaled, y_pred)
-
 print(f"Test MAE:  {mae_test:.4f}")
 print(f"Test RMSE: {rmse_test:.4f}")
 print(f"R² Score:  {r2:.4f}")
 print(f"Mean uncertainty: ±{np.mean(y_std_unscaled):.4f}")
+
 
 if r2 > 0:
     print("Positive R² - model is learning!")
@@ -414,11 +529,11 @@ else:
 
 
 # ---------------------------
-# Step 7.5: Model Comparison Among Different Approaches 
+# Step 7.5: Model Comparison Among Different Approaches
 # ---------------------------
 
 # ---------------------------
-# For GP Variant 1: Baseline Vessel-Aware Kernel 
+# For GP Variant 1: Baseline Vessel-Aware Kernel
 # ---------------------------
 gp_baseline = GaussianProcessRegressor(
     kernel=create_vessel_kernel(len(feature_columns), n_vessels_encoded),  # current vessel-aware kernel
@@ -439,8 +554,8 @@ rmse_baseline = np.sqrt(mean_squared_error(y_test_unscaled, y_pred_gp_baseline))
 
 
 # ---------------------------
-# For GP Variant 2: GP with Matern Kernel 
-# ---------------------------# --- For GP Variant 2: GP with Matern Kernel (for vessel features)
+# For GP Variant 2: GP with Matern Kernel
+# ---------------------------
 def create_vessel_kernel_matern(n_features, n_vessels):
     """
     Create a vessel-aware kernel where:
@@ -526,7 +641,7 @@ print(f"   R²: {r2_rf:.3f}, MAE: {mae_rf:.3f}, RMSE: {rmse_rf:.3f}")
 # ---------------------------
 # Step 3: Visualization
 # ---------------------------
-print("\n Creating enhanced visualizations...")
+print("\n Creating visualizations.")
 fig = plt.figure(figsize=(20, 15))
 gs = fig.add_gridspec(3, 3, hspace=0.3, wspace=0.3)
 
@@ -538,7 +653,6 @@ ax1.set_yticklabels(selected_features)
 ax1.set_xlabel('F-Score')
 ax1.set_title('Selected Feature Importance')
 ax1.grid(True, alpha=0.3)
-
 colors = plt.cm.viridis(np.linspace(0, 1, len(selected_features)))
 for bar, color in zip(bars, colors):
     bar.set_color(color)
@@ -566,12 +680,14 @@ ax2.set_title('Learning Curve')
 ax2.legend()
 ax2.grid(True, alpha=0.3)
 
-# 3. Prediction vs Actual
+# 3. Prediction vs Actual Scatter Plot with Error Bars
 ax3 = fig.add_subplot(gs[0, 2])
 scatter = ax3.scatter(y_test_unscaled, y_pred, alpha=0.6, c=y_std_unscaled, cmap='viridis', s=50)
 min_val = min(y_test_unscaled.min(), y_pred.min())
 max_val = max(y_test_unscaled.max(), y_pred.max())
 ax3.plot([min_val, max_val], [min_val, max_val], 'r--', linewidth=2)
+# Add error bars:
+ax3.errorbar(y_test_unscaled, y_pred, yerr=z_score * y_std_unscaled, fmt='none', ecolor='gray', alpha=0.5)
 ax3.set_xlabel('Actual Valuation (Million USD)')
 ax3.set_ylabel('Predicted Valuation (Million USD)')
 ax3.set_title(f'Predictions vs Actual (R² = {r2:.3f})')
@@ -588,7 +704,7 @@ ax4.set_ylabel('Residuals')
 ax4.set_title('Residual Analysis')
 ax4.grid(True, alpha=0.3)
 
-# 5. Time Series Example (including vessel one-hots)
+# 5. Time Series Example 
 ax5 = fig.add_subplot(gs[1, 1:])
 test_vessel = None
 for vessel in train_vessels:
@@ -607,10 +723,13 @@ if test_vessel:
     vessel_scaled = scaler.transform(vessel_enhanced)
     vessel_pred_scaled, vessel_std_scaled = gp.predict(vessel_scaled, return_std=True)
     vessel_pred = vessel_pred_scaled * y_std + y_mean
-    vessel_uncertainty = vessel_std_scaled * y_std
+    # Use the calibrated uncertainty adjustment for consistency:
+    vessel_uncertainty = vessel_std_scaled * y_std * best_factor
     ax5.plot(vessel_data['Quarter'], vessel_data['Valuation'], 'b-', linewidth=2, label='Actual', alpha=0.8)
     ax5.plot(vessel_data['Quarter'], vessel_pred, 'r--', linewidth=2, label='Predicted', alpha=0.8)
-    ax5.fill_between(vessel_data['Quarter'], vessel_pred - vessel_uncertainty, vessel_pred + vessel_uncertainty,
+    ax5.fill_between(vessel_data['Quarter'],
+                     vessel_pred - z_score * vessel_uncertainty,
+                     vessel_pred + z_score * vessel_uncertainty,
                      alpha=0.3, color='red', label='Uncertainty Band')
     split_quarter = vessel_data['Quarter'].iloc[int(0.7 * len(vessel_data))]
     ax5.axvline(x=split_quarter, color='green', linestyle=':', alpha=0.7, label='Train/Test Split')
@@ -620,7 +739,7 @@ if test_vessel:
     ax5.legend()
     ax5.grid(True, alpha=0.3)
 
-# 6. Diagnostics Panel (with AIC and BIC)
+# 6. Diagnostics Panel (with AIC, BIC, and other performance metrics)
 ax6 = fig.add_subplot(gs[2, :])
 diagnostics = {
     'Mean Absolute Error': mae_test,
@@ -656,7 +775,7 @@ plt.show()
 # Step 4: Cross-validation with multiple vessels
 # ---------------------------
 group_kfold = GroupKFold(n_splits=5)
-print(f"\n Cross-validation across vessel groups...")
+print(f"Cross-validation across vessel groups.")
 cv_results = []
 for fold, (train_idx, val_idx) in enumerate(group_kfold.split(X_scaled, groups=train_data['Asset']), 1):
     X_train_cv, X_val_cv = X_scaled[train_idx], X_scaled[val_idx]
@@ -718,8 +837,8 @@ print(summary)
 import seaborn as sns
 import matplotlib.pyplot as plt
 
-features_to_check = ['WACC', 'LaggedVesselValue', 'ForwardFreightRate', 
-                     'LaggedBDI', 'COVID', 'IMORegs', 'Geopolitical', 
+features_to_check = ['WACC', 'LaggedVesselValue', 'ForwardFreightRate',
+                     'LaggedBDI', 'COVID', 'IMORegs', 'Geopolitical',
                      'VesselAge', 'TimeSinceDryDock', 'Opex', 'Inflation', 'Valuation']
 
 corr_matrix = synthetic_df[features_to_check].corr()
