@@ -375,76 +375,7 @@ print("Calibrated Prediction Interval Coverage Probability (PICP):", PICP_calibr
 precision = np.mean(interval_upper - interval_lower)
 print("Average Interval Width (Sharpness) after calibration:", precision)
 
-# # ---------------------------------------------------
-# # --- Calibration of predicted uncertainties using cross-validation ---
-# # Define candidate calibration factors and set the nominal coverage
-# candidate_factors = np.linspace(0.5, 1.5, 11)  # candidates from 0.5 to 1.5
-# nominal_coverage = 0.95
-# z_score = 1.96
-
-# group_kfold = GroupKFold(n_splits=5)
-# cv_calibration_factors = []
-
-# print("\nCalibrating uncertainty estimates via cross-validation:")
-# for fold, (train_idx, val_idx) in enumerate(group_kfold.split(X_scaled, groups=train_data['Asset']), 1):
-#     X_train_cv, X_val_cv = X_scaled[train_idx], X_scaled[val_idx]
-#     y_train_cv, y_val_cv = y_scaled[train_data_enhanced.index.isin(train_idx)], y_scaled[train_data_enhanced.index.isin(val_idx)]
-
-#     gp_cv = GaussianProcessRegressor(
-#         kernel=create_vessel_kernel(len(feature_columns), len(encoder.categories_[0])),
-#         n_restarts_optimizer=5,
-#         alpha=1e-8,
-#         normalize_y=False,
-#         random_state=42
-#     )
-#     gp_cv.fit(X_train_cv, y_train_cv)
-#     y_val_pred, y_val_std = gp_cv.predict(X_val_cv, return_std=True)
-
-#     best_factor = None
-#     best_coverage_diff = np.inf
-
-#     # Test each candidate factor on the validation set:
-#     for factor in candidate_factors:
-#         # Adjust predicted std by factor:
-#         y_calibrated_std = y_val_std * factor
-#         lower_bound = y_val_pred - z_score * y_calibrated_std
-#         upper_bound = y_val_pred + z_score * y_calibrated_std
-
-#         # Since working on scaled targets here, compare within CV
-#         coverage = np.mean((y_val_cv >= lower_bound) & (y_val_cv <= upper_bound))
-#         diff = abs(coverage - nominal_coverage)
-#         if diff < best_coverage_diff:
-#             best_coverage_diff = diff
-#             best_factor = factor
-
-#     print(f"Fold {fold}: Best calibration factor = {best_factor:.3f} (Empirical coverage approx. {nominal_coverage + best_coverage_diff:.3f})")
-#     cv_calibration_factors.append(best_factor)
-
-# optimal_calibration_factor = np.mean(cv_calibration_factors)
-# print(f"\nOptimal calibration factor (averaged across folds): {optimal_calibration_factor:.3f}")
-
-# ---------------------------------------------------
-# # Making final predictions with calibrated uncertainties
-# print("   Making predictions with calibrated uncertainty...")
-# y_pred_scaled, y_std_scaled = gp.predict(X_test, return_std=True)
-# # Unscale predictions and uncertainties
-# y_pred = y_pred_scaled * y_std + y_mean
-# y_test_unscaled = y_test * y_std + y_mean
-# # Apply calibration factor to uncertainties:
-# y_std_unscaled = y_std_scaled * y_std # * optimal_calibration_factor
-
-# # Compute prediction intervals using calibrated uncertainties
-# interval_lower = y_pred - z_score * y_std_unscaled
-# interval_upper = y_pred + z_score * y_std_unscaled
-
-# # Calculate PICP with calibrated intervals
-# PICP_calibrated = np.mean((y_test_unscaled >= interval_lower) & (y_test_unscaled <= interval_upper))
-# print("Calibrated Prediction Interval Coverage Probability (PICP):", PICP_calibrated)
-
-# # Calculate average interval width (sharpness after calibration)
-# precision_calibrated = np.mean(interval_upper - interval_lower)
-# print("Average Interval Width (Sharpness) after calibration:", precision_calibrated)
-
+#-------------------------------------------------------------------------------------------------------------
 # --- Integrate AIC and BIC calculation ---
 # 1. Extract log marginal likelihood
 log_marginal_likelihood = gp.log_marginal_likelihood(gp.kernel_.theta)
